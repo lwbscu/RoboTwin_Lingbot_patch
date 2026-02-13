@@ -13,7 +13,7 @@ class handover_block(Base_Task):
     def load_actors(self):
         rand_pos = rand_pose(
             xlim=[-0.25, -0.05],
-            ylim=[0, 0.25],
+            ylim=[0, 0.2],
             zlim=[0.842],
             qpos=[0.981, 0, 0, 0.195],
             rotate_rand=True,
@@ -44,7 +44,7 @@ class handover_block(Base_Task):
 
         self.add_prohibit_area(self.box, padding=0.1)
         self.add_prohibit_area(self.target_box, padding=0.1)
-        self.block_middle_pose = [0, 0.0, 0.9, 0, 1, 0, 0]
+        self.block_middle_pose = [0, 0.0, 0.92, 0, 1, 0, 0]
 
     def play_once(self):
         # Determine which arm to use for grasping based on box position
@@ -57,7 +57,7 @@ class handover_block(Base_Task):
             self.grasp_actor(
                 self.box,
                 arm_tag=grasp_arm_tag,
-                pre_grasp_dis=0.07,
+                pre_grasp_dis=0.08,
                 grasp_dis=0.0,
                 contact_point_id=[0, 1, 2, 3],
             ))

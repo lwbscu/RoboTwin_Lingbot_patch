@@ -30,6 +30,11 @@ from ._GLOBAL_CONFIGS import *
 from typing import Optional, Literal
 from PIL import Image, ImageDraw, ImageFont
 
+import threading
+# [RLinf Fix] 全局单例锁和变量
+_renderer_lock = threading.Lock()
+_GLOBAL_SAPIEN_ENGINE = None
+_GLOBAL_SAPIEN_RENDERER = None
 current_file_path = os.path.abspath(__file__)
 parent_directory = os.path.dirname(current_file_path)
 
@@ -41,19 +46,6 @@ class Base_Task(gym.Env):
 
     # =========================================================== Init Task Env ===========================================================
     def _init_task_env_(self, table_xy_bias=[0, 0], table_height_bias=0, **kwags):
-        """
-        Initialization TODO
-        - `self.FRAME_IDX`: The index of the file saved for the current scene.
-        - `self.fcitx5-configtool`: Left gripper pose (close <=0, open >=0.4).
-        - `self.ep_num`: Episode ID.
-        - `self.task_name`: Task name.
-        - `self.save_dir`: Save path.`
-        - `self.left_original_pose`: Left arm original pose.
-        - `self.right_original_pose`: Right arm original pose.
-        - `self.left_arm_joint_id`: [6,14,18,22,26,30].
-        - `self.right_arm_joint_id`: [7,15,19,23,27,31].
-        - `self.render_fre`: Render frequency.
-        """
         super().__init__()
         ta.setup_logging("CRITICAL")  # hide logging
         np.random.seed(kwags.get("seed", 0))
@@ -199,42 +191,44 @@ class Base_Task(gym.Env):
         pass
 
     def setup_scene(self, **kwargs):
-        """
-        Set the scene
-            - Set up the basic scene: light source, viewer.
-        """
-        self.engine = sapien.Engine()
-        # declare sapien renderer
+        # [RLinf PRO Fix] 将 import 提升到函数顶级作用域，确保变量全局可见
+        import sapien.core as sapien
         from sapien.render import set_global_config
+        import os
 
-        set_global_config(max_num_materials=50000, max_num_textures=50000)
-        self.renderer = sapien.SapienRenderer()
-        # give renderer to sapien sim
-        self.engine.set_renderer(self.renderer)
+        global _GLOBAL_SAPIEN_ENGINE, _GLOBAL_SAPIEN_RENDERER
+        
+        with _renderer_lock:
+            # 物理单例化逻辑
+            if _GLOBAL_SAPIEN_ENGINE is None:
+                # 强制使用 EGL 离屏渲染后端
+                os.environ["SAPIEN_RENDER_BACKEND"] = "egl"
+                
+                _GLOBAL_SAPIEN_ENGINE = sapien.Engine()
+                set_global_config(max_num_materials=50000, max_num_textures=50000)
+                
+                _GLOBAL_SAPIEN_RENDERER = sapien.SapienRenderer()
+                _GLOBAL_SAPIEN_ENGINE.set_renderer(_GLOBAL_SAPIEN_RENDERER)
+                
+                # === 必须执行：A800 Headless 唯一稳健路径 ===
+                # 由于 vulkaninfo 报错，必须使用 "default" (光栅化) 渲染器
+                sapien.render.set_camera_shader_dir("default") 
 
-        sapien.render.set_camera_shader_dir("rt")
-        sapien.render.set_ray_tracing_samples_per_pixel(32)
-        sapien.render.set_ray_tracing_path_depth(8)
-        sapien.render.set_ray_tracing_denoiser("oidn")
+        self.engine = _GLOBAL_SAPIEN_ENGINE
+        self.renderer = _GLOBAL_SAPIEN_RENDERER
 
-        # declare sapien scene
+        # 此时 sapien 变量在函数内是绝对可访问的
         scene_config = sapien.SceneConfig()
         self.scene = self.engine.create_scene(scene_config)
-        # set simulation timestep
         self.scene.set_timestep(kwargs.get("timestep", 1 / 250))
-        # add ground to scene
         self.scene.add_ground(kwargs.get("ground_height", 0))
-        # set default physical material
         self.scene.default_physical_material = self.scene.create_physical_material(
             kwargs.get("static_friction", 0.5),
             kwargs.get("dynamic_friction", 0.5),
             kwargs.get("restitution", 0),
         )
-        # give some white ambient light of moderate intensity
         self.scene.set_ambient_light(kwargs.get("ambient_light", [0.5, 0.5, 0.5]))
-        # default enable shadow unless specified otherwise
         shadow = kwargs.get("shadow", True)
-        # default spotlight angle and intensity
         direction_lights = kwargs.get("direction_lights", [[[0, 0.5, -1], [0.5, 0.5, 0.5]]])
         self.direction_light_lst = []
         for direction_light in direction_lights:
@@ -246,7 +240,6 @@ class Base_Task(gym.Env):
                 ]
             self.direction_light_lst.append(
                 self.scene.add_directional_light(direction_light[0], direction_light[1], shadow=shadow))
-        # default point lights position and intensity
         point_lights = kwargs.get("point_lights", [[[1, 0, 1.8], [1, 1, 1]], [[-1, 0, 1.8], [1, 1, 1]]])
         self.point_light_lst = []
         for point_light in point_lights:
@@ -254,8 +247,8 @@ class Base_Task(gym.Env):
                 point_light[1] = [np.random.rand(), np.random.rand(), np.random.rand()]
             self.point_light_lst.append(self.scene.add_point_light(point_light[0], point_light[1], shadow=shadow))
 
-        # initialize viewer with camera position and orientation
         if self.render_freq:
+            from sapien.utils.viewer import Viewer # 延迟导入
             self.viewer = Viewer(self.renderer)
             self.viewer.set_scene(self.scene)
             self.viewer.set_camera_xyz(
@@ -285,7 +278,6 @@ class Base_Task(gym.Env):
             file_count = len(
                 [name for name in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, name))])
 
-            # wall_texture, table_texture = random.randint(0, file_count - 1), random.randint(0, file_count - 1)
             wall_texture, table_texture = np.random.randint(0, file_count), np.random.randint(0, file_count)
 
             self.wall_texture, self.table_texture = (
@@ -388,9 +380,6 @@ class Base_Task(gym.Env):
         self.cluttered_objs = []
 
     def load_robot(self, **kwags):
-        """
-        load aloha robot urdf file, set root pose and set joints
-        """
         if not hasattr(self, "robot"):
             self.robot = Robot(self.scene, self.need_topp, **kwags)
             self.robot.set_planner(self.scene)
@@ -406,27 +395,16 @@ class Base_Task(gym.Env):
             link.set_mass(1)
 
     def load_camera(self, **kwags):
-        """
-        Add cameras and set camera parameters
-            - Including four cameras: left, right, front, head.
-        """
-
         self.cameras = Camera(
             bias=self.table_z_bias,
             random_head_camera_dis=self.random_head_camera_dis,
             **kwags,
         )
         self.cameras.load_camera(self.scene)
-        self.scene.step()  # run a physical step
-        self.scene.update_render()  # sync pose from SAPIEN to renderer
-
-    # =========================================================== Sapien ===========================================================
+        self.scene.step()
+        self.scene.update_render()
 
     def _update_render(self):
-        """
-        Update rendering to refresh the camera's RGBD information
-        (rendering must be updated even when disabled, otherwise data cannot be collected).
-        """
         if self.crazy_random_light:
             for renderColor in self.point_light_lst:
                 renderColor.set_color([np.random.rand(), np.random.rand(), np.random.rand()])
@@ -437,8 +415,6 @@ class Base_Task(gym.Env):
             self.scene.set_ambient_light(now_ambient_light)
         self.cameras.update_wrist_camera(self.robot.left_camera.get_pose(), self.robot.right_camera.get_pose())
         self.scene.update_render()
-
-    # =========================================================== Basic APIs ===========================================================
 
     def compress_path(self, path, tolerance=1e-5):
         compressed = [path[0]]
@@ -458,6 +434,9 @@ class Base_Task(gym.Env):
         indices = np.unique(indices)
         return positions[indices], velocities[indices]
 
+    # =============================================================================================
+    # 🩹 【核心修改】High-Standard Data Collection: 强制采集 14D Real Qpos
+    # =============================================================================================
     def get_obs(self):
         self._update_render()
         self.cameras.update_picture()
@@ -466,6 +445,7 @@ class Base_Task(gym.Env):
             "pointcloud": [],
             "joint_action": {},
             "endpose": {},
+            "qpos": None, # 初始化字段
         }
 
         pkl_dic["observation"] = self.cameras.get_config()
@@ -505,17 +485,31 @@ class Base_Task(gym.Env):
             pkl_dic["endpose"]["left_gripper"] = norm_gripper_val[0]
             pkl_dic["endpose"]["right_endpose"] = right_endpose
             pkl_dic["endpose"]["right_gripper"] = norm_gripper_val[1]
-        # qpos
-        if self.data_type.get("qpos", False):
+        
+        # --- 强制采集真实关节状态 (Real State) ---
+        # 不论 config 怎么写，必须采集这个以保证语义正确
+        real_l = self.robot.get_left_arm_real_jointState() # 应该返回 list [j1..j6, grip]
+        real_r = self.robot.get_right_arm_real_jointState()
+        
+        # 转 Numpy 并展平
+        real_l = np.array(real_l).flatten()
+        real_r = np.array(real_r).flatten()
+        
+        # 鲁棒性检查：如果是旧版 6维，自动补 0 (gripper)
+        if len(real_l) == 6: real_l = np.append(real_l, 0)
+        if len(real_r) == 6: real_r = np.append(real_r, 0)
+        
+        # 写入根目录 qpos (14维)
+        pkl_dic["qpos"] = np.concatenate([real_l[:7], real_r[:7]]).astype(np.float32)
+        
+        # 同时也写入旧的 joint_action 结构，保持兼容性
+        pkl_dic["joint_action"]["vector"] = pkl_dic["qpos"]
+        pkl_dic["joint_action"]["left_arm"] = real_l[:6]
+        pkl_dic["joint_action"]["left_gripper"] = real_l[6]
+        pkl_dic["joint_action"]["right_arm"] = real_r[:6]
+        pkl_dic["joint_action"]["right_gripper"] = real_r[6]
+        # -------------------------------------
 
-            left_jointstate = self.robot.get_left_arm_jointState()
-            right_jointstate = self.robot.get_right_arm_jointState()
-
-            pkl_dic["joint_action"]["left_arm"] = left_jointstate[:-1]
-            pkl_dic["joint_action"]["left_gripper"] = left_jointstate[-1]
-            pkl_dic["joint_action"]["right_arm"] = right_jointstate[:-1]
-            pkl_dic["joint_action"]["right_gripper"] = right_jointstate[-1]
-            pkl_dic["joint_action"]["vector"] = np.array(left_jointstate + right_jointstate)
         # pointcloud
         if self.data_type.get("pointcloud", False):
             pkl_dic["pointcloud"] = self.cameras.get_pcd(self.data_type.get("conbine", False))
@@ -534,25 +528,18 @@ class Base_Task(gym.Env):
         def add_reward_to_pic(img_np, reward):
             if type(reward) == float:
                 reward = round(reward, 4)
-            # pdb.set_trace()
-            # 将NumPy数组转换为Pillow Image
             img = Image.fromarray(img_np)
-            # 创建绘图对象
             draw = ImageDraw.Draw(img)
-            # 设置字体和大小
-            font_path = "./Times New Roman.ttf"  # 替换为你的字体路径
-            font_size = 20  # 字体大小
+            font_path = "./Times New Roman.ttf" 
+            font_size = 20 
             font = ImageFont.truetype(font_path, font_size)
-            # 确保 reward 是字符串
             reward_text = str(reward)
 
-            # 计算文本位置
             bbox = draw.textbbox((0, 0), reward_text, font=font)
             text_width, text_height = bbox[2] - bbox[0], bbox[3] - bbox[1]
-            position = (img.width - text_width - 10, 10)  # 距右上角10px
+            position = (img.width - text_width - 10, 10) 
 
-            # 绘制文字
-            text_color = (0, 0, 0)  # 白色
+            text_color = (0, 0, 0) 
             draw.text(position, reward_text, fill=text_color, font=font)
             return np.array(img)
         if not self.save_data:
@@ -596,7 +583,6 @@ class Base_Task(gym.Env):
         cache_path = self.folder_path["cache"]
         target_file_path = f"{self.save_dir}/data/episode{self.ep_num}.hdf5"
         target_video_path = f"{self.save_dir}/video/episode{self.ep_num}.mp4"
-        # print('Merging pkl to hdf5: ', cache_path, ' -> ', target_file_path)
 
         os.makedirs(f"{self.save_dir}/data", exist_ok=True)
         process_folder_to_hdf5_video(cache_path, target_file_path, target_video_path)
@@ -628,8 +614,6 @@ class Base_Task(gym.Env):
 
     def close_env(self, clear_cache=False):
         if clear_cache:
-            # for actor in self.scene.get_all_actors():
-            #     self.scene.remove_actor(actor)
             sapien_clear_cache()
         self.close()
 
@@ -655,12 +639,6 @@ class Base_Task(gym.Env):
         self.render_freq = render_freq
 
     def set_gripper(self, set_tag="together", left_pos=None, right_pos=None):
-        """
-        Set gripper posture
-        - `left_pos`: Left gripper pose
-        - `right_pos`: Right gripper pose
-        - `set_tag`: "left" to set the left gripper, "right" to set the right gripper, "together" to set both grippers simultaneously.
-        """
         alpha = 0.5
 
         left_result, right_result = None, None
@@ -732,8 +710,6 @@ class Base_Task(gym.Env):
         x_max = np.max(trans_bounding_pts[0]) + padding
         y_min = np.min(trans_bounding_pts[1]) - padding
         y_max = np.max(trans_bounding_pts[1]) + padding
-        # add_robot_visual_box(self, [x_min, y_min, actor_matrix[3, 3]])
-        # add_robot_visual_box(self, [x_max, y_max, actor_matrix[3, 3]])
         self.prohibited_area.append([x_min, y_min, x_max, y_max])
 
     def is_left_gripper_open(self):
@@ -753,8 +729,6 @@ class Base_Task(gym.Env):
 
     def is_right_gripper_close(self):
         return self.robot.is_right_gripper_close()
-
-    # =========================================================== Our APIS ===========================================================
 
     def together_close_gripper(self, save_freq=-1, left_pos=0, right_pos=0):
         left_result, right_result = self.set_gripper(left_pos=left_pos, right_pos=right_pos, set_tag="together")
@@ -784,10 +758,6 @@ class Base_Task(gym.Env):
         use_attach=False,
         save_freq=-1,
     ):
-        """
-        Interpolative planning with screw motion.
-        Will not avoid collision and will fail if the path contains collision.
-        """
         if not self.plan_success:
             return
         if pose is None:
@@ -817,10 +787,6 @@ class Base_Task(gym.Env):
         use_attach=False,
         save_freq=-1,
     ):
-        """
-        Interpolative planning with screw motion.
-        Will not avoid collision and will fail if the path contains collision.
-        """
         if not self.plan_success:
             return
         if pose is None:
@@ -852,10 +818,6 @@ class Base_Task(gym.Env):
         use_attach=False,
         save_freq=-1,
     ):
-        """
-        Interpolative planning with screw motion.
-        Will not avoid collision and will fail if the path contains collision.
-        """
         if not self.plan_success:
             return
         if left_target_pose is None or right_target_pose is None:
@@ -882,7 +844,6 @@ class Base_Task(gym.Env):
             right_success = right_result["status"] == "Success"
             if not left_success or not right_success:
                 self.plan_success = False
-                # return TODO
         except Exception as e:
             if left_result is None or right_result is None:
                 self.plan_success = False
@@ -899,8 +860,6 @@ class Base_Task(gym.Env):
         right_n_step = right_result["position"].shape[0] if right_success else 0
 
         while now_left_id < left_n_step or now_right_id < right_n_step:
-            # set the joint positions and velocities for move group joints only.
-            # The others are not the responsibility of the planner
             if (left_success and now_left_id < left_n_step
                     and (not right_success or now_left_id / left_n_step <= now_right_id / right_n_step)):
                 self.robot.set_arm_joints(
@@ -938,10 +897,6 @@ class Base_Task(gym.Env):
         actions_by_arm2: tuple[ArmTag, list[Action]] = None,
         save_freq=-1,
     ):
-        """
-        Take action for the robot.
-        """
-
         def get_actions(actions, arm_tag: ArmTag) -> list[Action]:
             if actions[1] is None:
                 if actions[0][0] == arm_tag:
@@ -1031,11 +986,6 @@ class Base_Task(gym.Env):
         return position_lst
 
     def check_actors_contact(self, actor1, actor2):
-        """
-        Check if two actors are in contact.
-        - actor1: The first actor.
-        - actor2: The second actor.
-        """
         contacts = self.scene.get_contacts()
         for contact in contacts:
             if (contact.bodies[0].entity.name == actor1
@@ -1052,10 +1002,6 @@ class Base_Task(gym.Env):
             print(contact.bodies[0].entity.name, contact.bodies[1].entity.name)
 
     def choose_best_pose(self, res_pose, center_pose, arm_tag: ArmTag = None):
-        """
-        Choose the best pose from the list of target poses.
-        - target_lst: List of target poses.
-        """
         if not self.plan_success:
             return [-1, -1, -1, -1, -1, -1, -1]
         if arm_tag == "left":
@@ -1086,13 +1032,6 @@ class Base_Task(gym.Env):
         contact_point_id: int = 0,
         pre_dis: float = 0.0,
     ) -> list:
-        """
-        Obtain the grasp pose through the marked grasp point.
-        - actor: The instance of the object to be grasped.
-        - arm_tag: The arm to be used, either "left" or "right".
-        - pre_dis: The distance in front of the grasp point.
-        - contact_point_id: The index of the grasp point.
-        """
         if not self.plan_success:
             return [-1, -1, -1, -1, -1, -1, -1]
 
@@ -1110,12 +1049,6 @@ class Base_Task(gym.Env):
         return res_pose
 
     def _default_choose_grasp_pose(self, actor: Actor, arm_tag: ArmTag, pre_dis: float) -> list:
-        """
-        Default grasp pose function.
-        - actor: The target actor to be grasped.
-        - arm_tag: The arm to be used for grasping, either "left" or "right".
-        - pre_dis: The distance in front of the grasp point, default is 0.1.
-        """
         id = -1
         score = -1
 
@@ -1136,12 +1069,6 @@ class Base_Task(gym.Env):
         target_dis=0,
         contact_point_id: list | float = None,
     ) -> list:
-        """
-        Test the grasp pose function.
-        - actor: The actor to be grasped.
-        - arm_tag: The arm to be used for grasping, either "left" or "right".
-        - pre_dis: The distance in front of the grasp point, default is 0.1.
-        """
         if not self.plan_success:
             return
         res_pre_top_down_pose = None
@@ -1571,8 +1498,8 @@ class Base_Task(gym.Env):
 
             try:
                 times, left_pos, left_vel, acc, duration = (self.robot.left_mplib_planner.TOPP(left_path,
-                                                                                            1 / 250,
-                                                                                            verbose=True))
+                                                                                               1 / 250,
+                                                                                               verbose=True))
                 left_result = dict()
                 left_result["position"], left_result["velocity"] = left_pos, left_vel
                 left_n_step = left_result["position"].shape[0]
@@ -1587,8 +1514,8 @@ class Base_Task(gym.Env):
 
             try:
                 times, right_pos, right_vel, acc, duration = (self.robot.right_mplib_planner.TOPP(right_path,
-                                                                                                1 / 250,
-                                                                                                verbose=True))
+                                                                                                  1 / 250,
+                                                                                                  verbose=True))
                 right_result = dict()
                 right_result["position"], right_result["velocity"] = right_pos, right_vel
                 right_n_step = right_result["position"].shape[0]
@@ -2225,7 +2152,7 @@ class Base_Task(gym.Env):
                     
                     success = 1
                     return obs_traj, action_traj, reward_traj, label_traj, success 
-     
+      
             # if len(obs_traj) >= nice_step:
             #     reward = 0
             # else:
@@ -2359,7 +2286,7 @@ class Base_Task(gym.Env):
 
             now_left_id = 0 if topp_left_flag else 1e9
             now_right_id = 0 if topp_right_flag else 1e9
-        
+
             while now_left_id < left_n_step or now_right_id < right_n_step:
                 if topp_left_flag and now_left_id < left_n_step and now_left_id / left_n_step <= now_right_id / right_n_step:
                     self.robot.set_arm_joints(left_result['position'][now_left_id], left_result['velocity'][now_left_id],'left')

@@ -314,7 +314,7 @@ class VectorEnv(gym.Env):
 
         self.global_lock = threading.Lock()
 
-        self.env_thread_pool = ThreadPoolExecutor(max_workers=n_envs)
+        self.env_thread_pool = ThreadPoolExecutor(max_workers=1)
 
         self._init_envs()
 
@@ -330,6 +330,9 @@ class VectorEnv(gym.Env):
             )
             sub_env.setup_task()
             self.envs.append(sub_env)
+            # [RLinf Fix] 错开渲染上下文创建时间，每隔 1s 启动一个环境
+            import time
+            time.sleep(1.0)
 
     def transform(self, results):
         res_dict = defaultdict(list)

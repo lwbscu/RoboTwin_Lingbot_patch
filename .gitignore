@@ -1,29 +1,58 @@
-models/
-data/*
+# ========= python / build =========
 __pycache__/
-**/checkpoints/
-result/
-envs/curobo
-*.zip
-viewer_show.*
-eval_video/
-# task_config/
-# eval result
-eval_result/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+build/
+dist/
 
-# Code Generation
+# ========= venv / editor =========
+.venv/
+venv/
+.vscode/
+.DS_Store
+
+# ========= logs / outputs =========
+*.log
+outputs/
+**/outputs/
+eval_video/
+eval_result/
+gen_reward_video/
+
+# ========= datasets / generated =========
+lerobot_dataset_*/
+**/lerobot_dataset_*/
+data/
+datasets/
+
+# ========= checkpoints / large artifacts =========
+**/checkpoints/
+policy/weights/*
+*.npy
+*.npz
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.zip
+*.tar
+*.tar.gz
+*.7z
+
+# ========= repo-specific =========
+envs/curobo/
+envs/curobo/*
+result/
 assets/*
 !assets/_download.py
 !assets/files
 
-policy/weights/*
+# runtime-generated configs (do NOT commit)
+robotwin/configs/
 
-envs/curobo/*
-
-.vscode
-/config.json
-
-/*.json*
-/*.txt
-
-gen_reward_video/
+# local script copies
+* copy.py
+* copy.yml

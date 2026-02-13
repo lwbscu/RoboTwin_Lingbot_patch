@@ -1,14 +1,14 @@
 render_freq: 0
-episode_num: 3
-use_seed: false
+episode_num: 300
+use_seed: true
 save_freq: 15
-planner_backend: curobo
-embodiment: ["aloha-agilex", "aloha-agilex", 0.6]
+planner_backend: mplib
+embodiment: ["piper", "piper", 0.6]
 language_num: 100
 domain_randomization:
   random_background: true
-  cluttered_table: true  # <--- 生成杂物
-  clean_background_rate: 1.0
+  cluttered_table: true
+  clean_background_rate: 0.02
   random_head_camera_dis: 0
   random_table_height: 0.03
   random_light: true
@@ -20,7 +20,7 @@ camera:
   collect_wrist_camera: false
 data_type:
   rgb: true
-  third_view: true
+  third_view: false
   depth: false
   pointcloud: false
   observer: false
