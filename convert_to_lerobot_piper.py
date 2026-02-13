@@ -21,7 +21,7 @@ VIDEO_KEY = "observation.images.head_camera"
 # ============
 
 def calculate_stats(files):
-    print("📊 计算 Action/State 全局统计量，并严格对齐 1D/3D Numpy 形状契约...")
+    print("📊 计算 Action/State 全局统计量...")
     all_qpos = []
     for file_path in files:
         try:
@@ -42,22 +42,15 @@ def calculate_stats(files):
     def to_311(val_list):
         return [[[v]] for v in val_list]
 
-    # 👑 核心修复：所有的 count 必须包裹在列表中，使其成为 shape=(1,) 的 numpy 数组
     stats = {
-        "action": { 
-            "mean": mean, "std": std, "min": min_val, "max": max_val, 
-            "count": [total_count]  # <- 终极修复点
-        },
-        "observation.state": { 
-            "mean": mean, "std": std, "min": min_val, "max": max_val, 
-            "count": [total_count]  # <- 终极修复点
-        },
+        "action": { "mean": mean, "std": std, "min": min_val, "max": max_val, "count": [total_count] },
+        "observation.state": { "mean": mean, "std": std, "min": min_val, "max": max_val, "count": [total_count] },
         VIDEO_KEY: {
             "mean": to_311([0.485, 0.456, 0.406]),
             "std": to_311([0.229, 0.224, 0.225]),
             "min": to_311([0.0, 0.0, 0.0]),
             "max": to_311([1.0, 1.0, 1.0]),
-            "count": [total_count]  # <- 终极修复点
+            "count": [total_count]
         }
     }
     return stats, total_count
@@ -73,10 +66,11 @@ def decode_images_to_tensor(images_bytes):
     video_tensor = video_tensor.permute(0, 2, 3, 1) # (T, H, W, C)
     return video_tensor
 
-def save_episode(ep_idx, actions_raw, images_bytes, output_dir):
+# 👑 接收 global_frame_idx 参数
+def save_episode(ep_idx, actions_raw, images_bytes, output_dir, global_frame_idx):
     chunk_idx = ep_idx // CHUNKS_SIZE
     valid_length = len(actions_raw) - 1
-    if valid_length < 1: return
+    if valid_length < 1: return 0
     images_valid = images_bytes[:valid_length]
     
     video_dir = os.path.join(output_dir, "videos", "chunk-000", VIDEO_KEY)
@@ -99,6 +93,7 @@ def save_episode(ep_idx, actions_raw, images_bytes, output_dir):
             "frame_index": t,
             "timestamp": t / float(FPS),
             "next.done": t == (valid_length - 1),
+            "index": global_frame_idx + t, # 👑 终极补丁：写入全局绝对索引
             "task_index": 0
         })
     pd.DataFrame(frame_data).to_parquet(parquet_path)
@@ -114,9 +109,10 @@ def gen_and_save():
     global_stats, total_frames_from_stats = calculate_stats(files)
     
     total_frames = 0
+    global_frame_idx = 0 # 👑 全局帧追踪器
     episodes_metadata = []
     
-    print(f"🚀 [v2.1 Master] 数据组装与元数据打包中...")
+    print(f"🚀 [v2.1 Master] 正在注入全局绝对索引 'index' ...")
     for ep_idx, file_path in enumerate(files):
         try:
             with h5py.File(file_path, 'r') as f:
@@ -126,12 +122,12 @@ def gen_and_save():
                     images_bytes = [x if isinstance(x, (bytes, np.bytes_)) else x.tobytes() for x in f['observation/head_camera/rgb'][:]]
                 else: continue
                 
-                length = save_episode(ep_idx, actions_raw, images_bytes, OUTPUT_DIR)
-                if length:
+                # 传入当前全局索引
+                length = save_episode(ep_idx, actions_raw, images_bytes, OUTPUT_DIR, global_frame_idx)
+                if length > 0:
                     ep_stats = {}
                     for k, v in global_stats.items():
                         ep_stats[k] = v.copy()
-                        # 👑 每集的独立统计量，count 也必须包裹在列表中
                         ep_stats[k]["count"] = [length]
                     
                     episodes_metadata.append({
@@ -140,6 +136,8 @@ def gen_and_save():
                         "stats": ep_stats
                     })
                     total_frames += length
+                    global_frame_idx += length # 👑 累加绝对索引
+
                 if (ep_idx+1) % 5 == 0: print(f"  已处理 {ep_idx+1} 集...")
         except Exception as e:
             print(f"❌ {file_path}: {e}")
@@ -172,6 +170,7 @@ def gen_and_save():
             "frame_index": {"dtype": "int64", "shape": [1], "names": None},
             "timestamp": {"dtype": "float32", "shape": [1], "names": None},
             "next.done": {"dtype": "bool", "shape": [1], "names": None},
+            "index": {"dtype": "int64", "shape": [1], "names": None}, # 👑 宣告 index 特征存在
             "task_index": {"dtype": "int64", "shape": [1], "names": None}
         },
         "splits": {"train": f"0:{total_episodes}"}
@@ -195,7 +194,7 @@ def gen_and_save():
             }
             f.write(json.dumps(line) + "\n")
 
-    print(f"✅ 转换完成！所有 Numpy Shape 强校验锁已解除。")
+    print(f"✅ 转换完成！所有数据层级已 100% 贯通。")
 
 if __name__ == "__main__":
     gen_and_save()
