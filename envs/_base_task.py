@@ -378,11 +378,22 @@ class Base_Task(gym.Env):
 
         self.size_dict = None
         self.cluttered_objs = []
-
     def load_robot(self, **kwags):
         if not hasattr(self, "robot"):
             self.robot = Robot(self.scene, self.need_topp, **kwags)
-            self.robot.set_planner(self.scene)
+            
+            # 👑 [核心防爆手术 6]：有条件地加载规划器
+            # 如果配置里写了 planner_backend='none'，我们就跳过 planner 初始化！
+            # 这样 load_robot 就不会报错，后面的 load_camera 就能正常执行。
+            planner_backend = kwags.get("planner_backend", "mplib")
+            if planner_backend.lower() != "none":
+                try:
+                    self.robot.set_planner(self.scene)
+                except Exception as e:
+                    print(f"⚠️ [Warning] Planner init failed: {e}. But we will continue for End-to-End mode.")
+            else:
+                print("🛡️ [End-to-End Mode] Skipping Planner Initialization.")
+            
             self.robot.init_joints()
         else:
             self.robot.reset(self.scene, self.need_topp, **kwags)
@@ -393,7 +404,6 @@ class Base_Task(gym.Env):
         for link in self.robot.right_entity.get_links():
             link: sapien.physx.PhysxArticulationLinkComponent = link
             link.set_mass(1)
-
     def load_camera(self, **kwags):
         self.cameras = Camera(
             bias=self.table_z_bias,

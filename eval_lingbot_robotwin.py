@@ -194,7 +194,9 @@ def main():
     try: args = load_robust_config(TASK_NAME)
     except FileNotFoundError as e: print(e); return
 
+    # 👑 [恢复占位]：我们把 mplib 还给它，让机器人实体能够顺利创建
     args["planner_backend"] = "none" 
+    # 但是绝不允许它进行任何逆向运动学和防碰撞计算！
     args["need_plan"] = False        
     
     import logging
@@ -204,14 +206,13 @@ def main():
 
     env = get_env_instance(TASK_NAME)
     
-    # 👑 [核心防爆手术 5]：动态劫持存在 Bug 的渲染函数
+    # 动态劫持存在 Bug 的渲染函数
     original_update_render = env._update_render
     def patched_update_render():
         try:
             original_update_render()
         except AttributeError as e:
             if "cameras" in str(e):
-                # 强行更新视图，绕过缺少腕部相机的报错
                 if hasattr(env, "viewer") and env.viewer is not None:
                     env.viewer.update_render()
                 elif hasattr(env, "scene"):
@@ -221,14 +222,21 @@ def main():
     env._update_render = patched_update_render
     
     print("🌍 Starting Simulation Initialization...")
+    env_ready = False
     for i in range(10):
         try:
             env.setup_demo(now_ep_num=0, seed=i, is_test=True, **args)
             print(f"✅ Simulation Seed {i} Ready.")
+            env_ready = True
             break
         except Exception as e: 
             print(f"⚠️ Seed {i} setup failed: {e}")
             continue
+            
+    # 👑 [绝对防线]：如果环境没起来，直接掐断，绝不硬跑！
+    if not env_ready:
+        print("❌ 致命错误：环境初始化全部失败，请检查上方 Seed setup failed 的报错！")
+        return
             
     engine = LingBotInferenceEngine(CHECKPOINT_PATH, device="cuda")
     

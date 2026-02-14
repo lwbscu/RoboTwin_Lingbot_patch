@@ -28,6 +28,8 @@ class Robot:
     def _init_robot_(self, scene, need_topp=False, **kwargs):
         self.planner_backend = kwargs.get("planner_backend", "curobo")
 
+        # 无论后续是否执行 set_planner，它都必须有一个安全的回退值
+        self.communication_flag = False
         self.left_js = None
         self.right_js = None
 
@@ -131,8 +133,12 @@ class Robot:
                 self.right_conn.send({"cmd": "reset"})
                 _ = self.right_conn.recv()
         else:
-            if not isinstance(self.left_planner, CuroboPlanner) or not isinstance(self.right_planner, CuroboPlanner):
-                self.set_planner(scene=scene)
+            # 👑 [核心防爆手术 8]：检查是否禁用了 planner
+            if getattr(self, "planner_backend", "curobo") != "none":
+                # 只有在启用了 planner 的情况下，才去安全地检查并设置它
+                if not hasattr(self, "left_planner") or not isinstance(self.left_planner, CuroboPlanner) or not isinstance(self.right_planner, CuroboPlanner):
+                    self.set_planner(scene=scene)
+                    
         self.init_joints()
 
     def get_grasp_perfect_direction(self, arm_tag):
@@ -274,6 +280,13 @@ class Robot:
             self.left_conn.send({"cmd": "plan_grippers", "now_val": now_val, "target_val": target_val})
             return self.left_conn.recv()
         else:
+            if not hasattr(self, "left_planner"):
+                return {
+                    "result": np.array([target_val]), # 👑 必须是 1D Array
+                    "per_step": 0.1,                  # 👑 必须是 Float (0.1)
+                    "num_step": 1, 
+                    "status": "Success"
+                }
             return self.left_planner.plan_grippers(now_val, target_val)
 
     def right_plan_grippers(self, now_val, target_val):
@@ -281,6 +294,13 @@ class Robot:
             self.right_conn.send({"cmd": "plan_grippers", "now_val": now_val, "target_val": target_val})
             return self.right_conn.recv()
         else:
+            if not hasattr(self, "right_planner"):
+                return {
+                    "result": np.array([target_val]), 
+                    "per_step": 0.1, 
+                    "num_step": 1, 
+                    "status": "Success"
+                }
             return self.right_planner.plan_grippers(now_val, target_val)
 
     def left_plan_multi_path(self, target_lst, constraint_pose=None, use_point_cloud=False, use_attach=False, last_qpos=None):
