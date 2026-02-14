@@ -1,5 +1,5 @@
 render_freq: 0
-episode_num: 300
+episode_num: 10
 use_seed: true
 save_freq: 15
 planner_backend: mplib
