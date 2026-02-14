@@ -224,21 +224,20 @@ class Robot:
     def set_planner(self, scene=None):
         abs_left_curobo_yml_path = os.path.join(CONFIGS.ROOT_PATH, self.left_curobo_yml_path)
         abs_right_curobo_yml_path = os.path.join(CONFIGS.ROOT_PATH, self.right_curobo_yml_path)
-        self.communication_flag = (abs_left_curobo_yml_path != abs_right_curobo_yml_path)
-
+        
         if self.is_dual_arm:
             abs_left_curobo_yml_path = abs_left_curobo_yml_path.replace("curobo.yml", "curobo_left.yml")
             abs_right_curobo_yml_path = abs_right_curobo_yml_path.replace("curobo.yml", "curobo_right.yml")
 
+        # 👑 [核心防爆手术 11]：无论文件路径是否不同，强行关闭通信标志！禁止开辟多进程！
+        self.communication_flag = False
+
         if not self.communication_flag:
-            if self.planner_backend == "curobo":
+            if self.planner_backend.strip() == "curobo":
                 assert CuroboPlanner is not None, "CuroboPlanner not imported"
+                # 在单进程中顺序实例化左右臂的 Curobo
                 self.left_planner = CuroboPlanner(self.left_entity_origion_pose, self.left_arm_joints_name, [joint.get_name() for joint in self.left_entity.get_active_joints()], yml_path=abs_left_curobo_yml_path)
                 self.right_planner = CuroboPlanner(self.right_entity_origion_pose, self.right_arm_joints_name, [joint.get_name() for joint in self.right_entity.get_active_joints()], yml_path=abs_right_curobo_yml_path)
-            elif self.planner_backend == "mplib":
-                self.left_planner = MplibWrapperPlanner(self.left_entity_origion_pose, self.left_arm_joints_name, [joint.get_name() for joint in self.left_entity.get_active_joints()], urdf_path=self.left_urdf_path, srdf_path=self.left_srdf_path, move_group=self.left_move_group, robot_entity=self.left_entity, planner_type="mplib_RRT", scene=scene)
-                self.right_planner = MplibWrapperPlanner(self.right_entity_origion_pose, self.right_arm_joints_name, [joint.get_name() for joint in self.right_entity.get_active_joints()], urdf_path=self.right_urdf_path, srdf_path=self.right_srdf_path, move_group=self.right_move_group, robot_entity=self.right_entity, planner_type="mplib_RRT", scene=scene)
-            else:
                 raise ValueError(f"Unsupported planner type: {self.planner_backend}")
         else:
             assert self.planner_backend == "curobo", "Only curobo planner is supported for communication"

@@ -1,17 +1,17 @@
 render_freq: 0
-episode_num: 10
+episode_num: 1
 use_seed: true
 save_freq: 15
 planner_backend: mplib
 embodiment: ["piper", "piper", 0.6]
 language_num: 100
 domain_randomization:
-  random_background: true
-  cluttered_table: true
+  random_background: false
+  cluttered_table: false
   clean_background_rate: 0.02
   random_head_camera_dis: 0
-  random_table_height: 0.03
-  random_light: true
+  random_table_height: 0
+  random_light: false
   crazy_random_light_rate: 0.02
 camera:
   head_camera_type: D435
