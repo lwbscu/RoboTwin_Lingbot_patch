@@ -19,9 +19,9 @@ from rlinf.models.embodiment.lingbot_vla.lingbot_vla_action_model import LingBot
 import importlib
 
 # === ⚙️ 核心评估配置区 ===
-CHECKPOINT_PATH = "/mnt/public/lwb/work/embodied_stack/results/robotwin_sft_lingbot/checkpoints/global_step_50/actor/model_state_dict/full_weights.pt"
+CHECKPOINT_PATH = "/mnt/public/lwb/work/embodied_stack/results/robotwin_sft_lingbot/checkpoints/global_step_165/actor/model_state_dict/full_weights.pt"
 TASK_NAME = "handover_block"
-TASK_CONFIG = "demo_randomized"
+TASK_CONFIG = "demo_randomized_aloha"
 OUTPUT_VIDEO = "eval_lingbot_vla.mp4"
 MAX_STEPS = 400
 INSTRUCTION = "Pick up the block and hand it over to the other arm."
@@ -90,18 +90,18 @@ def apply_action_robust(env, action_vec):
     r_arm_target = action_vec[7:13] 
     r_grip_target = action_vec[13]
     
-    def safe_set(entity, target_6d, grip_1d):
-        try:
-            q = entity.get_qpos()
-            if len(q) >= 7:
-                q[-7:-1] = target_6d 
-                q[-1] = grip_1d      
-                entity.set_qpos(q)
-                entity.set_qvel(np.zeros_like(q))
-        except: pass
-
-    safe_set(env.robot.left_entity, l_arm_target, l_grip_target)
-    safe_set(env.robot.right_entity, r_arm_target, r_grip_target)
+    # 👑 1. 官方正规途径：直接调用底层定义好的关节控制方法
+    # 传递目标位置 (target_position) 和 零目标速度 (target_velocity)
+    env.robot.set_arm_joints(l_arm_target, np.zeros(6), "left")
+    env.robot.set_arm_joints(r_arm_target, np.zeros(6), "right")
+    env.robot.set_gripper(l_grip_target, "left")
+    env.robot.set_gripper(r_grip_target, "right")
+    
+    # 👑 2. 物理引擎步进：必须让时间流动，PD 控制器才能将手臂推向目标位置！
+    # 假设你的模型动作频率约 10Hz，SAPIEN 物理引擎默认为 500Hz，则步进 25-50 次为宜
+    for _ in range(25):
+        env.scene.step()
+        
     env._update_render()
 
 
@@ -135,13 +135,33 @@ class LingBotInferenceEngine:
         self.tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_path)
 
         # 👑 Bounds_99 统计信息 (Robotwin 14D)
-        arm_q01 = [-0.967696, -0.000316, -0.000818, -1.595294, -0.444409, -2.210820, -0.136485, -0.002513, -0.001647, -1.702366, -1.029245, -1.670216]
-        arm_q99 = [0.170456, 2.579206, 2.479186, 1.263499, 1.228358, 1.462294, 1.096450, 2.605947, 2.503909, 1.310469, 1.074876, 2.104229]
-        eff_q01 = [-1e-10, -1e-10]
-        eff_q99 = [0.999800, 0.999800]
+        import json
+        norm_path = "/mnt/public/lwb/work/embodied_stack/lingbot-vla/assets/norm_stats/robotwin_50.json"
         
-        self.q01 = torch.tensor(arm_q01[:7] + eff_q01[:1] + arm_q01[7:] + eff_q01[1:], device=self.device, dtype=torch.float32)
-        self.q99 = torch.tensor(arm_q99[:7] + eff_q99[:1] + arm_q99[7:] + eff_q99[1:], device=self.device, dtype=torch.float32)
+        try:
+            with open(norm_path, 'r') as f:
+                norm_data = json.load(f)["norm_stats"]
+            
+            # 读取 Arm (6D * 2 = 12D) 的极值
+            arm_q01 = norm_data["action.arm.position"]["q01"]
+            arm_q99 = norm_data["action.arm.position"]["q99"]
+            
+            # 读取 Effector (1D * 2 = 2D) 的极值
+            eff_q01 = norm_data["action.effector.position"]["q01"]
+            eff_q99 = norm_data["action.effector.position"]["q99"]
+            
+            # 👑 严格按照 14D 顺序拼接: [L_Arm(6), L_Grip(1), R_Arm(6), R_Grip(1)]
+            combined_q01 = arm_q01[:6] + [eff_q01[0]] + arm_q01[6:] + [eff_q01[1]]
+            combined_q99 = arm_q99[:6] + [eff_q99[0]] + arm_q99[6:] + [eff_q99[1]]
+            
+            self.q01 = torch.tensor(combined_q01, device=self.device, dtype=torch.float32)
+            self.q99 = torch.tensor(combined_q99, device=self.device, dtype=torch.float32)
+            
+            print("✅ [Normalizer] Successfully loaded and aligned 14D bounds from robotwin_50.json")
+            
+        except Exception as e:
+            print(f"❌ [Normalizer Error] Failed to load bounds: {e}")
+            raise e
 
         self.action_buffer = []
         self.chunk_idx = 0
@@ -223,15 +243,16 @@ def main():
     
     print("🌍 Starting Simulation Initialization...")
     env_ready = False
-    for i in range(10):
-        try:
-            env.setup_demo(now_ep_num=0, seed=i, is_test=True, **args)
-            print(f"✅ Simulation Seed {i} Ready.")
-            env_ready = True
-            break
-        except Exception as e: 
-            print(f"⚠️ Seed {i} setup failed: {e}")
-            continue
+    
+    # 👑 【神谕测试】直接、唯一地使用我们刚才提取的黄金种子！
+    target_seed = 989255
+    
+    try:
+        env.setup_demo(now_ep_num=0, seed=target_seed, is_test=True, **args)
+        print(f"✅ Simulation Seed {target_seed} Ready.")
+        env_ready = True
+    except Exception as e: 
+        print(f"⚠️ Seed {target_seed} setup failed: {e}")
             
     # 👑 [绝对防线]：如果环境没起来，直接掐断，绝不硬跑！
     if not env_ready:
