@@ -4,8 +4,7 @@
 Convert RoboTwin HDF5 episodes DIRECTLY to LeRobot v3.0 dataset.
 Strictly preserves 4 cameras: head, front, left, right.
 """
-from PIL import Image
-import io
+
 import argparse
 import shutil
 from pathlib import Path
@@ -26,25 +25,25 @@ def _rm_dir_strict(p: Path):
     if p.exists():
         shutil.rmtree(p)
 
-def _decode_jpeg_to_pil(data, expected_hw=(240, 320)):
+def _decode_jpeg_like_to_chw_float32(data, *, expected_hw=(240, 320)) -> np.ndarray:
     if isinstance(data, np.ndarray):
-        buf = data.tobytes()
+        buf = data.astype(np.uint8, copy=False).reshape(-1)
     else:
-        buf = bytes(data)
-        
-    img = Image.open(io.BytesIO(buf)).convert("RGB")
-    
-    if img.size != (expected_hw[1], expected_hw[0]): # PIL size 是 (W, H)
-        img = img.resize((expected_hw[1], expected_hw[0]), Image.Resampling.BILINEAR)
-    
-    # 👑 终极绝杀：负负得正！
-    # 因为 HDF5 里的 JPG 是 BGR 存的，PIL 读出来以为是 RGB。
-    # 我们把它转成 numpy 数组，交换第 0 通道 (R) 和第 2 通道 (B)，再转回 PIL！
-    img_np = np.array(img)
-    img_np = img_np[:, :, ::-1] # BGR -> RGB
-    img = Image.fromarray(img_np)
-    
-    return img
+        buf = np.frombuffer(data, dtype=np.uint8)
+
+    img_bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+    if img_bgr is None:
+        raise ValueError("cv2.imdecode returned None.")
+
+    h, w = img_bgr.shape[:2]
+    eh, ew = expected_hw
+    if (h, w) != (eh, ew):
+        img_bgr = cv2.resize(img_bgr, (ew, eh), interpolation=cv2.INTER_AREA)
+
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)  
+    img_f32 = img_rgb.astype(np.float32) / 255.0         
+    chw = np.transpose(img_f32, (2, 0, 1))               
+    return chw
 
 def _as_f32_1d(x, *, dim: int, name: str) -> np.ndarray:
     arr = np.asarray(x, dtype=np.float32)
@@ -123,14 +122,16 @@ def convert(
             T = int(action.shape[0])
 
             for t in range(T):
-                # 直接传给 LeRobot 官方最喜欢的 PIL Image
-                head_img = _decode_jpeg_to_pil(head_ds[t], expected_hw=head_hw)
-                left_img = _decode_jpeg_to_pil(left_ds[t], expected_hw=left_hw)
-                right_img = _decode_jpeg_to_pil(right_ds[t], expected_hw=right_hw)
+                # 解码 4 个视角的图像
+                head_img = _decode_jpeg_like_to_chw_float32(head_ds[t], expected_hw=head_hw)
+                front_img = _decode_jpeg_like_to_chw_float32(front_ds[t], expected_hw=front_hw)
+                left_img = _decode_jpeg_like_to_chw_float32(left_ds[t], expected_hw=left_hw)
+                right_img = _decode_jpeg_like_to_chw_float32(right_ds[t], expected_hw=right_hw)
                 
                 state14 = _as_f32_1d(qpos[t], dim=14, name="observation.state")
                 act14 = _as_f32_1d(action[t], dim=14, name="action")
 
+                # 👑 每一帧必须带上完整的 4 个摄像头数据
                 frame = {
                     "observation.images.cam_high": head_img,
                     "observation.images.cam_left_wrist": left_img,
@@ -139,6 +140,7 @@ def convert(
                     "action": act14,
                     "task": task_description,
                 }
+                
                 dataset.add_frame(frame)
 
             dataset.save_episode()

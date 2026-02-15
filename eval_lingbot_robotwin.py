@@ -19,12 +19,12 @@ from rlinf.models.embodiment.lingbot_vla.lingbot_vla_action_model import LingBot
 import importlib
 
 # === ⚙️ 核心评估配置区 ===
-CHECKPOINT_PATH = "/mnt/public/lwb/work/embodied_stack/results/robotwin_sft_lingbot/checkpoints/global_step_70/actor/model_state_dict/full_weights.pt"
+CHECKPOINT_PATH = "/mnt/public/lwb/work/embodied_stack/results/robotwin_sft_lingbot/checkpoints/global_step_100/actor/model_state_dict/full_weights.pt"
 TASK_NAME = "handover_block"
 TASK_CONFIG = "demo_randomized_aloha"
 OUTPUT_VIDEO = "eval_lingbot_vla.mp4"
 MAX_STEPS = 400
-INSTRUCTION = "Pick up the block and hand it over to the other arm."
+INSTRUCTION = "Pick up the block with the left arm and hand it over to the right arm."
 # =========================
 
 def load_yaml(path):
