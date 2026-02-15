@@ -19,7 +19,7 @@ from rlinf.models.embodiment.lingbot_vla.lingbot_vla_action_model import LingBot
 import importlib
 
 # === ⚙️ 核心评估配置区 ===
-CHECKPOINT_PATH = "/mnt/public/lwb/work/embodied_stack/results/robotwin_sft_lingbot/checkpoints/global_step_165/actor/model_state_dict/full_weights.pt"
+CHECKPOINT_PATH = "/mnt/public/lwb/work/embodied_stack/results/robotwin_sft_lingbot/checkpoints/global_step_70/actor/model_state_dict/full_weights.pt"
 TASK_NAME = "handover_block"
 TASK_CONFIG = "demo_randomized_aloha"
 OUTPUT_VIDEO = "eval_lingbot_vla.mp4"
@@ -33,7 +33,12 @@ def load_yaml(path):
 def load_robust_config(task_name):
     args = load_yaml(os.path.join(ROBOTWIN_ROOT, "task_config", f"{TASK_CONFIG}.yml"))
     if 'camera' not in args: args['camera'] = {}
-    args['camera'].update({'collect_head_camera': True, 'collect_left_camera': True, 'collect_right_camera': True})
+    # 👑 严格对齐 RoboTwin 的底层变量名
+    args['camera'].update({
+        'collect_head_camera': True, 
+        'collect_front_camera': True, 
+        'collect_wrist_camera': True   # 这一句就能同时开启 left_camera 和 right_camera
+    })
     args['data_type'] = {'rgb': True}
     args['render_freq'] = 0
     args["task_name"] = task_name
@@ -80,6 +85,10 @@ def get_real_qpos(env):
         return np.zeros(14, dtype=np.float32)
 
 def apply_action_robust(env, action_vec):
+    """
+    最纯净的底层下发：不越俎代庖去搞数学 LERP，
+    把力矩求解权还给底层的 SAPIEN PhysX 物理引擎！
+    """
     action_vec = np.atleast_1d(action_vec).flatten()
     if len(action_vec) != 14:
         if len(action_vec) > 14: action_vec = action_vec[:14]
@@ -89,19 +98,20 @@ def apply_action_robust(env, action_vec):
     l_grip_target = action_vec[6]
     r_arm_target = action_vec[7:13] 
     r_grip_target = action_vec[13]
+
+    # 👑 1. 模拟环境官方的调用方式：传 0 速度，但配合极短的 step
+    zero_vel = np.zeros(6, dtype=np.float32)
+    env.robot.set_arm_joints(l_arm_target, zero_vel, "left")
+    env.robot.set_arm_joints(r_arm_target, zero_vel, "right")
     
-    # 👑 1. 官方正规途径：直接调用底层定义好的关节控制方法
-    # 传递目标位置 (target_position) 和 零目标速度 (target_velocity)
-    env.robot.set_arm_joints(l_arm_target, np.zeros(6), "left")
-    env.robot.set_arm_joints(r_arm_target, np.zeros(6), "right")
     env.robot.set_gripper(l_grip_target, "left")
     env.robot.set_gripper(r_grip_target, "right")
     
-    # 👑 2. 物理引擎步进：必须让时间流动，PD 控制器才能将手臂推向目标位置！
-    # 假设你的模型动作频率约 10Hz，SAPIEN 物理引擎默认为 500Hz，则步进 25-50 次为宜
-    for _ in range(25):
-        env.scene.step()
-        
+    # 👑 2. 物理步进与渲染
+    # 关键点：不要用 for 循环连续 step 10 次或 25 次！
+    # 直接 step 1 次，或者参照 check_dataset.py 里的官方逻辑，
+    # 把它当做单帧步进，让模型的 10Hz 输出频率自然形成平滑轨迹！
+    env.scene.step()
     env._update_render()
 
 
@@ -127,14 +137,14 @@ class LingBotInferenceEngine:
         if os.path.exists(ckpt_path):
             state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=True)
             self.model.load_state_dict(state_dict, strict=False)
-            print(f"✅ [Model] Successfully loaded SFT weights from Step 50!")
+            print(f"✅ [Model] Successfully loaded SFT weights!")
         else:
             print(f"⚠️ [Model] Checkpoint not found! Using raw base model.")
             
         self.model.eval()
         self.tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_path)
 
-        # 👑 Bounds_99 统计信息 (Robotwin 14D)
+        # 👑 [绝对正确的度量衡]：动态读取 JSON，确保 14D 顺序丝毫不差
         import json
         norm_path = "/mnt/public/lwb/work/embodied_stack/lingbot-vla/assets/norm_stats/robotwin_50.json"
         
@@ -142,15 +152,13 @@ class LingBotInferenceEngine:
             with open(norm_path, 'r') as f:
                 norm_data = json.load(f)["norm_stats"]
             
-            # 读取 Arm (6D * 2 = 12D) 的极值
             arm_q01 = norm_data["action.arm.position"]["q01"]
             arm_q99 = norm_data["action.arm.position"]["q99"]
             
-            # 读取 Effector (1D * 2 = 2D) 的极值
             eff_q01 = norm_data["action.effector.position"]["q01"]
             eff_q99 = norm_data["action.effector.position"]["q99"]
             
-            # 👑 严格按照 14D 顺序拼接: [L_Arm(6), L_Grip(1), R_Arm(6), R_Grip(1)]
+            # 严格按照 ALOHA 14D 顺序拼接: [L_Arm(6), L_Grip(1), R_Arm(6), R_Grip(1)]
             combined_q01 = arm_q01[:6] + [eff_q01[0]] + arm_q01[6:] + [eff_q01[1]]
             combined_q99 = arm_q99[:6] + [eff_q99[0]] + arm_q99[6:] + [eff_q99[1]]
             
@@ -166,6 +174,7 @@ class LingBotInferenceEngine:
         self.action_buffer = []
         self.chunk_idx = 0
 
+    # 👑 [恢复反归一化函数]：将 [-1, 1] 翻译回真实的物理弧度
     def unnormalize_action(self, action_norm):
         return (action_norm + 1.0) / 2.0 * (self.q99 - self.q01) + self.q01
 
@@ -176,33 +185,45 @@ class LingBotInferenceEngine:
             self.chunk_idx += 1
             return act
 
-        # 1. 🛡️ 图像预处理防线: 缩放224 + 伪造三视角
-        raw_img = obs['observation']['head_camera']['rgb'] if 'head_camera' in obs['observation'] else obs['observation'][list(obs['observation'].keys())[0]]['rgb']
-        img_tensor = torch.from_numpy(raw_img).permute(2, 0, 1).unsqueeze(0).float()
-        if raw_img.max() > 1.1: img_tensor /= 255.0
-        
-        base_img = F.interpolate(img_tensor, size=(224, 224), mode="bilinear", align_corners=False).to(torch.bfloat16)
-        images = torch.stack([base_img, base_img, base_img], dim=1).to(self.device)
+        # 👑 提取真实的 3 视角，严格对接大模型的视觉骨干
+        def process_img(cam_key):
+            if cam_key not in obs['observation']:
+                print(f"⚠️ Warning: Camera '{cam_key}' missing from env obs! Falling back to head_camera.")
+                cam_key = 'head_camera' if 'head_camera' in obs['observation'] else list(obs['observation'].keys())[0]
+            raw_img = obs['observation'][cam_key]['rgb']
+            img_tensor = torch.from_numpy(raw_img).permute(2, 0, 1).unsqueeze(0).float()
+            if raw_img.max() > 1.1: img_tensor /= 255.0
+            return F.interpolate(img_tensor, size=(224, 224), mode="bilinear", align_corners=False).to(torch.bfloat16)
 
-        # 2. 🛡️ 状态预处理防线: 严格 14D
-        qpos = get_real_qpos(obs["env"]) # Hack: 通过 env 引用读取
+        # 把环境里渲染出的真实头、左腕、右腕，分别提取出来
+        base_img = process_img('head_camera')
+        left_wrist_img = process_img('left_camera')
+        right_wrist_img = process_img('right_camera')
+
+        qpos = get_real_qpos(obs["env"]) 
         state_tensor = torch.tensor(qpos, dtype=torch.float32, device=self.device).unsqueeze(0)
 
-        # 3. 组织推理数据
+        # 👑 完美的坑位对齐
         data = {
             "observation": {
-                "image": {"base_0_rgb": images[:, 0], "left_wrist_0_rgb": images[:, 1], "right_wrist_0_rgb": images[:, 2]},
+                "image": {
+                    "base_0_rgb": base_img.to(self.device),             
+                    "left_wrist_0_rgb": left_wrist_img.to(self.device),   
+                    "right_wrist_0_rgb": right_wrist_img.to(self.device)  
+                },
                 "state": state_tensor
             },
             "prompt": [instruction]
         }
 
-        # 4. 模型预测
         output = self.model(forward_type="rollout", data=data)
-        actions_norm = output["action"][0] # (50, 14)
         
-        # 5. 逆归一化并缓存
+        # 1. 提取 bfloat16 动作并转为 float32 (NumPy 才能接得住)
+        actions_norm = output["action"][0].to(torch.float32)
+        
+        # 2. 调用正确的 14D 反归一化，翻译为物理弧度
         actions_unnorm = self.unnormalize_action(actions_norm).cpu().numpy()
+        
         self.action_buffer = actions_unnorm
         self.chunk_idx = 1
         
@@ -245,7 +266,7 @@ def main():
     env_ready = False
     
     # 👑 【神谕测试】直接、唯一地使用我们刚才提取的黄金种子！
-    target_seed = 989255
+    target_seed = 951329
     
     try:
         env.setup_demo(now_ep_num=0, seed=target_seed, is_test=True, **args)

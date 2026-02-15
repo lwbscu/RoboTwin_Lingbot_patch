@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Convert RoboTwin HDF5 episodes DIRECTLY to LeRobot v3.0 dataset.
+Strictly preserves 4 cameras: head, front, left, right.
 """
 
 import argparse
@@ -58,6 +59,8 @@ def convert(
     task_description: str,
     head_hw=(240, 320),
     front_hw=(240, 320),
+    left_hw=(240, 320),   # 👑 新增左手相机分辨率
+    right_hw=(240, 320),  # 👑 新增右手相机分辨率
 ):
     _require(input_dir.exists(), f"INPUT_DIR not found: {input_dir}")
     files = sorted(input_dir.glob("*.hdf5"))
@@ -65,7 +68,7 @@ def convert(
 
     _rm_dir_strict(output_dir)
 
-    # 👑 V3.0 规范：只定义传感器和动作特征，千万不要定义 index, timestamp 等系统保留字
+    # 👑 V3.0 规范：严格注册 4 个相机的特征，绝不漏掉手腕视角！
     base_features = {
         "observation.images.head_camera": {
             "dtype": "video",
@@ -75,6 +78,16 @@ def convert(
         "observation.images.front_camera": {
             "dtype": "video",
             "shape": (3, int(front_hw[0]), int(front_hw[1])),
+            "names": ["c", "h", "w"],
+        },
+        "observation.images.left_camera": {
+            "dtype": "video",
+            "shape": (3, int(left_hw[0]), int(left_hw[1])),
+            "names": ["c", "h", "w"],
+        },
+        "observation.images.right_camera": {
+            "dtype": "video",
+            "shape": (3, int(right_hw[0]), int(right_hw[1])),
             "names": ["c", "h", "w"],
         },
         "observation.state": {"dtype": "float32", "shape": (14,), "names": ["motors"]},
@@ -96,35 +109,45 @@ def convert(
         print(f"\nProcessing {h5_path.name} ...")
 
         with h5py.File(h5_path, "r") as f:
-            # 基础结构校验
+            # 👑 基础结构与 4 视角完整性绝对校验
             _require("joint_action" in f and "vector" in f["joint_action"], f"Missing action in {h5_path.name}")
             _require("observation" in f and "head_camera" in f["observation"] and "rgb" in f["observation"]["head_camera"], "Missing head_camera")
             _require("observation" in f and "front_camera" in f["observation"] and "rgb" in f["observation"]["front_camera"], "Missing front_camera")
+            _require("observation" in f and "left_camera" in f["observation"] and "rgb" in f["observation"]["left_camera"], "Missing left_camera")
+            _require("observation" in f and "right_camera" in f["observation"] and "rgb" in f["observation"]["right_camera"], "Missing right_camera")
 
             action = np.asarray(f["joint_action"]["vector"][:], dtype=np.float32)
             
-            # 容错：如果没有 qpos，用 action 代替
             if "qpos" in f["observation"]:
                 qpos = np.asarray(f["observation"]["qpos"][:], dtype=np.float32)
             else:
                 print("⚠️ [Warning] qpos not found, falling back to using 'action' as state.")
                 qpos = action.copy()
 
+            # 提取 4 个视角的数据流
             head_ds = f["observation"]["head_camera"]["rgb"]
             front_ds = f["observation"]["front_camera"]["rgb"]
+            left_ds = f["observation"]["left_camera"]["rgb"]
+            right_ds = f["observation"]["right_camera"]["rgb"]
 
             T = int(action.shape[0])
 
             for t in range(T):
+                # 解码 4 个视角的图像
                 head_img = _decode_jpeg_like_to_chw_float32(head_ds[t], expected_hw=head_hw)
                 front_img = _decode_jpeg_like_to_chw_float32(front_ds[t], expected_hw=front_hw)
+                left_img = _decode_jpeg_like_to_chw_float32(left_ds[t], expected_hw=left_hw)
+                right_img = _decode_jpeg_like_to_chw_float32(right_ds[t], expected_hw=right_hw)
+                
                 state14 = _as_f32_1d(qpos[t], dim=14, name="observation.state")
                 act14 = _as_f32_1d(action[t], dim=14, name="action")
 
-                # 👑 每一帧必须带上 task 描述字符串
+                # 👑 每一帧必须带上完整的 4 个摄像头数据
                 frame = {
                     "observation.images.head_camera": head_img,
                     "observation.images.front_camera": front_img,
+                    "observation.images.left_camera": left_img,
+                    "observation.images.right_camera": right_img,
                     "observation.state": state14,
                     "action": act14,
                     "task": task_description,
@@ -132,21 +155,19 @@ def convert(
                 
                 dataset.add_frame(frame)
 
-            # V3.0 在这里会完成所有 Parquet 写入和后台 MP4 生成
             dataset.save_episode()
             print(f"✅ Saved episode {ep_idx} with {T} frames.")
 
-    # 👑 优雅地关闭后台异步视频写入线程 (V3.0 标准操作)
     if hasattr(dataset, "stop_image_writer"):
         dataset.stop_image_writer()
         
-    print(f"\n🎉 ALL DONE! The pure V3.0 dataset is ready at: {output_dir}")
+    print(f"\n🎉 ALL DONE! The pure V3.0 dataset (4 Cameras) is ready at: {output_dir}")
 
 
 def build_argparser():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input_dir", type=str, default="data/handover_block/demo_randomized_aloha/data")
-    ap.add_argument("--output_dir", type=str, default="lerobot_dataset_aloha_debug")
+    ap.add_argument("--output_dir", type=str, default="lerobot_dataset_aloha")
     ap.add_argument("--repo_id", type=str, default="aloha_handover_debug")
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument(
@@ -158,6 +179,11 @@ def build_argparser():
     ap.add_argument("--head_w", type=int, default=320)
     ap.add_argument("--front_h", type=int, default=240)
     ap.add_argument("--front_w", type=int, default=320)
+    # 👑 为左右手腕相机保留分辨率参数
+    ap.add_argument("--left_h", type=int, default=240)
+    ap.add_argument("--left_w", type=int, default=320)
+    ap.add_argument("--right_h", type=int, default=240)
+    ap.add_argument("--right_w", type=int, default=320)
     return ap
 
 
@@ -171,4 +197,6 @@ if __name__ == "__main__":
         task_description=args.task,
         head_hw=(args.head_h, args.head_w),
         front_hw=(args.front_h, args.front_w),
+        left_hw=(args.left_h, args.left_w),
+        right_hw=(args.right_h, args.right_w),
     )

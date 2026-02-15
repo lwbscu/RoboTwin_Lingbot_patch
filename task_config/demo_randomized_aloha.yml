@@ -1,5 +1,5 @@
 render_freq: 0
-episode_num: 1                  # 👑 【核心】只采 1 条黄金数据！
+episode_num: 10                  # 👑 【核心】只采 100 条黄金数据！
 use_seed: true                  # 👑 【核心】开启固定种子，确保 Eval 和 Collect 场景绝对一致
 save_freq: 15
 planner_backend: curobo         # 👑 【保持】ALOHA 必须用 Curobo 算运动学
@@ -7,9 +7,9 @@ embodiment: ["aloha-agilex", "aloha-agilex", 0.6]
 language_num: 100
 
 domain_randomization:
-  random_background: false      # 🚫 关掉随机背景
-  cluttered_table: false        # 🚫 关掉桌上杂物干扰
-  clean_background_rate: 1.0
+  random_background: true      # 随机背景
+  cluttered_table: true        # 桌上杂物干扰
+  clean_background_rate: 0.2
   random_head_camera_dis: 0
   random_table_height: 0        # 🚫 关掉桌子高度随机
   random_light: false           # 🚫 关掉随机光照
@@ -19,7 +19,7 @@ camera:
   head_camera_type: D435
   wrist_camera_type: D435
   collect_head_camera: true
-  collect_wrist_camera: false
+  collect_wrist_camera: true
 
 data_type:
   rgb: true
